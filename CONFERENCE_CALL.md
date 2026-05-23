@@ -246,7 +246,70 @@ already has.
 
 ---
 
-## 7. Agent names
+## 7. Operator prompt templates
+
+The Operator's quality lives almost entirely in its prompts — this is the part to
+invest in. It runs several small, **single-purpose** templates rather than one
+mega-prompt: each is easier to tune, emits structured output, and shares a stable
+system preamble (cacheable) plus variable context (roster, the open question, the
+target agent's vocabulary, recent transcript).
+
+### A. Brevity edit — agent request → speech (inbound polish)
+
+Takes an agent's raw bid/update plus its task context and rewrites it into the
+fixed turn shape: a short spoken update plus exactly **one** clear question. Drops
+lists, paths, hashes, and jargon dumps; preserves the actual decision the human
+must make. Output: `{update, question}`. This is the Operator-side polish referenced
+in §5, sitting above the deterministic speechifier floor.
+
+### B. Speech recovery — your STT → agent instruction (the hard one)
+
+This is the **logical extrapolation of plausible misparsings**. The template treats
+the raw transcript as noisy and reasons *explicitly* about how speech-to-text could
+have mangled what you actually said, then picks the most plausible intended meaning
+given context. Inputs deliberately include the corrective context:
+
+- the **open question** you're answering,
+- the **target agent's domain vocabulary** (e.g. its open component names),
+- the **roster** (for redirect names),
+- recent call transcript.
+
+The prompt instructs the model to enumerate candidate interpretations —
+**phonetic neighbors, homophones, mangled technical terms, dropped or inserted
+words** — score them against context, and emit
+`{instruction, targetAgentId, confidence, alternatives}`. Worked case: raw STT
+`"frobenius norm metta equaliser"` + the agent's open component
+`"Frobenius-normed meta equalizer"` → high-confidence match. Context is the
+corrector; STT never has to be perfect.
+
+### C. Addressing / redirect detection
+
+Decides whether you named a different agent (overriding the default "reply to whoever
+just asked"), fuzzy/phonetic-matching the spoken token against the roster (§6).
+
+### D. Bid arbitration
+
+Ranks outstanding bids and chooses the next speaker (urgency, staleness, blocking
+others) — see §4.
+
+### E. Disambiguation phrasing
+
+When confidence from B/C is low, generates the short spoken clarifying question for
+the announcer voice ("Otter on infra, or Otto on web?").
+
+### Design notes
+
+- **Confidence is first-class.** Every interpretation carries a confidence that gates
+  best-guess vs. spoken-confirm vs. visual fallback (§6) — no silent misroutes.
+- **Single-purpose beats monolith.** Separate templates are independently tunable and
+  testable; misparse-recovery quality can be regression-tested against a fixture set
+  of `(raw STT, context) → expected instruction` pairs.
+- **Stable preamble + variable context** makes the templates cache-friendly, which
+  matters for cost/consistency even though latency is relaxed.
+
+---
+
+## 8. Agent names
 
 Names already exist (`agent.name`, auto-generated adjective+animal, overridable in
 `profiles.json`), so the addressing handle is there. The work is making names
@@ -267,7 +330,7 @@ matching absorbing residual errors either way.
 
 ---
 
-## 8. Phasing
+## 9. Phasing
 
 Each phase is independently useful.
 
@@ -287,7 +350,7 @@ Each phase is independently useful.
 
 ---
 
-## 9. Risks & open questions
+## 10. Risks & open questions
 
 - **Event-driven agents.** Instances think only when prompted, so free-flowing
   spontaneous conversation is genuinely hard — lean on lifecycle-event-triggered
@@ -297,5 +360,9 @@ Each phase is independently useful.
   *bottleneck* concern but not the *failure* concern.)
 - **Routing quality** is what makes or breaks the feel; the best-guess +
   voice-correct loop and high-accuracy STT are the mitigations.
+- **Operator prompt templates are the primary quality lever** (§7). Brevity edits
+  and misparse-recovery are where the experience is won or lost — budget real tuning
+  time and build a fixture set of `(raw STT, context) → expected instruction` pairs
+  to regression-test recovery as templates change.
 - **Open:** final call-name set; whether the Operator should also accept silent
   voice *commands* ("mute Otter", "who's on the call?") in addition to routing.
