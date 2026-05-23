@@ -687,29 +687,61 @@ class Agent{
       if(this.leaveT>=1)agents.delete(this.id);}}
 }
 let wantAgent=new URL(location).searchParams.get('agent')||null;
-// Conference call (Phase 0): speak the current utterance via the browser's
-// built-in voice, then ack so the daemon advances the speak-queue. Browsers
-// gate speech behind a user gesture; until then the daemon watchdog advances.
-const callPlayback={spokenIds:new Set()};
+// Conference call (Phase 1): the Operator's announcer voice introduces each
+// turn, then the agent's distinct voice speaks the body, then we ack so the
+// daemon advances the speak-queue. Audio comes from the open-source Piper
+// sidecar when it's up; otherwise we fall back to the browser's Web Speech
+// voice. Browsers gate audio behind a user gesture; until then the daemon
+// watchdog advances on its own.
+const callPlayback={spokenIds:new Set(),voiceBase:null,sidecar:false};
+let callVoiceInit=null;
+async function initCallVoice(){
+  try{
+    const cfg=await fetch('/api/call/config').then(r=>r.json());
+    if(cfg&&cfg.voicePort)
+      callPlayback.voiceBase=location.protocol+'//'+location.hostname+':'+cfg.voicePort;
+  }catch{}
+  if(callPlayback.voiceBase){
+    try{const h=await fetch(callPlayback.voiceBase+'/health').then(r=>r.json());
+      callPlayback.sidecar=!!(h&&h.piper);}catch{callPlayback.sidecar=false;}
+  }}
+function ensureCallVoice(){return callVoiceInit||(callVoiceInit=initCallVoice());}
 function ackUtterance(id){
   fetch('/api/call/ack',{method:'POST',
     headers:{'content-type':'application/json'},
     body:JSON.stringify({id})}).catch(()=>{});}
-function speakUtterance(item){
-  const text=item.speech||item.text||'';
-  if(!('speechSynthesis'in window)||!text){ackUtterance(item.id);return;}
+function speakWeb(text){
+  return new Promise((resolve)=>{
+    if(!('speechSynthesis'in window)||!text){resolve();return;}
+    try{const u=new SpeechSynthesisUtterance(text);
+      let done=false;const fin=()=>{if(done)return;done=true;resolve();};
+      u.onend=fin;u.onerror=fin;window.speechSynthesis.speak(u);
+    }catch{resolve();}});}
+function speakPiper(text,voice){
+  return fetch(callPlayback.voiceBase+'/tts',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({text,voice})})
+    .then(r=>{if(!r.ok)throw new Error('tts '+r.status);return r.blob();})
+    .then(blob=>new Promise((resolve)=>{
+      const url=URL.createObjectURL(blob);const a=new Audio(url);
+      const fin=()=>{URL.revokeObjectURL(url);resolve();};
+      a.onended=fin;a.onerror=fin;a.play().catch(fin);}))
+    .catch(()=>speakWeb(text));}
+function speakOne(text,voice){
+  if(!text)return Promise.resolve();
+  return(callPlayback.sidecar&&voice)?speakPiper(text,voice):speakWeb(text);}
+async function speakUtterance(item){
   try{
-    const u=new SpeechSynthesisUtterance(text);
-    let done=false;const finish=()=>{if(done)return;done=true;ackUtterance(item.id);};
-    u.onend=finish;u.onerror=finish;
-    window.speechSynthesis.speak(u);
-  }catch{ackUtterance(item.id);}}
+    if(item.announce&&item.announce.text)
+      await speakOne(item.announce.text,item.announce.voice);
+    await speakOne(item.speech||item.text||'',item.voice);
+  }finally{ackUtterance(item.id);}}
 function handleCall(state){
   if(!state)return;
   const cur=state.current;
   if(cur&&!callPlayback.spokenIds.has(cur.id)){
     callPlayback.spokenIds.add(cur.id);
-    speakUtterance(cur);
+    ensureCallVoice().then(()=>speakUtterance(cur));
   }}
 function connect(){const ws=new WebSocket(
   (location.protocol==='https:'?'wss://':'ws://')+location.host);

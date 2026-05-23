@@ -26,6 +26,7 @@ import { RuntimeManager } from './runtime-manager.mjs';
 import { TaskStore } from './task-store.mjs';
 import { CallQueue } from './call-store.mjs';
 import { speechify } from './call-speechifier.mjs';
+import { voiceFor, ANNOUNCER_VOICE } from './call-voices.mjs';
 
 const PORT = Number(process.env.OFFICE_PORT || 4317);
 const __dir = path.dirname(fileURLToPath(import.meta.url));
@@ -1584,6 +1585,7 @@ function handleUpgrade(req, socket) {
 // the browser plays it and acks `tts-done`, the daemon advances. A watchdog
 // auto-advances if no browser is listening so the queue never wedges.
 // ---------------------------------------------------------------------------
+const VOICE_PORT = Number(process.env.OFFICE_VOICE_PORT || 4318);
 const call = new CallQueue();
 let callWatchdog = null;
 
@@ -1595,7 +1597,9 @@ function clearCallWatchdog() {
 }
 function armCallWatchdog(item) {
   clearCallWatchdog();
-  const ms = Math.min(60000, 4000 + (item.speech ? item.speech.length : 0) * 80);
+  const chars = (item.speech ? item.speech.length : 0)
+    + (item.announce && item.announce.text ? item.announce.text.length : 0);
+  const ms = Math.min(60000, 5000 + chars * 80);
   callWatchdog = setTimeout(() => { callWatchdog = null; finishCall(item.id); }, ms);
 }
 function pumpCall() {
@@ -1605,15 +1609,20 @@ function pumpCall() {
   }
   broadcastCall();
 }
-function enqueueUtterance({ agentId, agentName, text, urgency } = {}) {
+function enqueueUtterance({ agentId, agentName, text, urgency, voice } = {}) {
   const speech = speechify(text);
   if (!speech) return null;
+  const name = agentName || 'Agent';
   const item = {
     id: 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     agentId: agentId || null,
-    agentName: agentName || 'Agent',
+    agentName: name,
     text: String(text),
     speech,
+    voice: voiceFor(agentId, voice),
+    // The Operator's announcer voice introduces each turn (Phase 1). The
+    // browser plays this before the body, then acks once at the end.
+    announce: { text: name, voice: ANNOUNCER_VOICE },
     urgency: urgency || 'normal',
     createdAt: Date.now(),
   };
@@ -1925,6 +1934,10 @@ const server = http.createServer(async (req, res) => {
     catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
     const result = sendLeadDirectMessage(body);
     sendJson(res, result.status || 200, result);
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/call/config') {
+    sendJson(res, 200, { voicePort: VOICE_PORT, announcerVoice: ANNOUNCER_VOICE });
     return;
   }
   if (req.method === 'GET' && pathname === '/api/call/state') {

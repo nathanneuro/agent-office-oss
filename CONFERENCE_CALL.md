@@ -4,7 +4,9 @@ A voice extension for The Office: each agent gets a distinct synthesized voice,
 the human talks back by voice, and a hidden coordinator decides who speaks when
 and who your replies are addressed to.
 
-Status: **design / not yet built.** This doc is for markup before code.
+Status: **Phases 0–1 built; Phases 2–3 still design.** Phase 0 (speak-queue +
+speechifier) and Phase 1 (Piper voice sidecar, per-agent voices, announcer voice)
+are implemented; the Operator and your spoken replies (Phase 2+) remain design.
 
 ---
 
@@ -381,13 +383,15 @@ matching absorbing residual errors either way.
 
 Each phase is independently useful.
 
-- **Phase 0 — output-only, no models.** `call` channel + speechifier + daemon
-  speak-queue + browser reads utterances aloud with one voice. De-risks
-  turn-taking before any audio model exists.
-- **Phase 1 — distinct voices.** Piper sidecar, per-agent voice from profiles;
-  curated call-names; the Operator's announcer voice introducing each turn
-  ("Blue Otter"). (Announcing is just TTS of a name — it needs no parsing, so it
-  lands here, before the mic exists.)
+- **Phase 0 — output-only, no models. [built]** speak-queue + speechifier + daemon
+  one-voice-at-a-time + browser reads utterances aloud. De-risks turn-taking before
+  any audio model exists. (`call-speechifier.mjs`, `call-store.mjs`, daemon
+  `/api/call/{speak,ack,state}`, `office-call.mjs`.)
+- **Phase 1 — distinct voices. [built]** Piper voice sidecar (`voice-sidecar.mjs`),
+  deterministic per-agent voice (`call-voices.mjs`), and the Operator's announcer
+  voice introducing each turn ("Blue Otter"). Falls back to Web Speech when the
+  sidecar/model is absent. (Announcing is just TTS of a name — no parsing — so it
+  lands here, before the mic exists.) Curated call-names still TODO.
 - **Phase 2 — you talk back (the meat).** Mic + Whisper + barge-in/ducking +
   the Operator (hidden coordinator) doing parsing/addressing/routing, wired into
   NEEDS-YOU.
