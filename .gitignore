@@ -12,6 +12,9 @@
 .env.*
 *.key
 profiles.local.json
+# Piper voice models — large binaries, machine-local
+/voices/*
+!/voices/README.md
 # Node / OS
 node_modules/
 *.log
