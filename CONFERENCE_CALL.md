@@ -191,7 +191,10 @@ Two layers, belt-and-suspenders:
 
 1. **Generation-side** — a skill instruction (same mechanism as the existing
    `the-office` skill) telling agents that call-channel posts must be short,
-   spoken-style, no lists/paths/hashes.
+   spoken-style, no lists/paths/hashes. Reinforced per-turn by the Operator's
+   standing meta note appended to every injected prompt — *"(User is on the vocal
+   interface. Please be succinct.)"* (§6) — so the reminder rides along with the
+   actual instruction instead of relying on the agent remembering a one-time rule.
 2. **Deterministic speechifier sanitizer** in the daemon — the safety net, since
    the model can't be trusted to always comply. Transforms before TTS: code block
    → "shared a snippet", long number → rounded / "about X", file path → basename,
@@ -223,13 +226,18 @@ already has.
   recent call transcript + roster + open prompts and produces structured
   `{targetAgentId, intent, cleanedText, confidence}`. It's robust to garble
   *because* it has the context to disambiguate.
-- **Disambiguation.** Because the Operator now has a voice, it can resolve
-  uncertainty three ways, cheapest first:
+- **Disambiguation.** Because the Operator has a voice, it resolves uncertainty in
+  escalating ways, by how unclear the input is:
   - **Best-guess + voice-correctable** (happy path): route to the most likely
     target, inject the prompt, and the UI highlights which agent got it. If wrong,
     you say "no, the other one" and it re-routes.
   - **Spoken confirmation** for genuine ambiguity: the announcer voice asks a quick
     "Otter on infra, or Otto on web?" rather than guessing.
+  - **Request rephrase** when the transcript is too garbled to make sense of at all
+    — i.e. even the best candidate interpretation falls below a hard confidence
+    floor. The Operator does *not* guess or inject anything; it asks you to say it
+    again ("Sorry, I didn't catch that — could you rephrase?"). This is the last
+    resort that keeps a bad transcription from turning into a wrong instruction.
   - **Visual fallback**: surface a text prompt on screen (NEEDS-YOU overlay) when
     you'd rather not interrupt the audio.
 - **What the agent receives is processed text, never raw speech.** The pipeline is
@@ -239,6 +247,11 @@ already has.
   and not the garbled transcript. The Operator absorbs STT errors, expands terse
   spoken answers ("yeah do the first one" → "Proceed with option A: the in-place
   migration"), and attaches any context the agent needs to act.
+- **Standing meta note on every injection.** The Operator auto-appends a short
+  standing instruction to the text it injects — *"(User is on the vocal interface.
+  Please be succinct.)"* — so agents keep their next bid/reply short and
+  speech-shaped at the source. This shapes generation up front and complements the
+  brevity-edit template (§7A) that cleans up whatever still comes back too long.
 - **Payoff:** that processed text drops straight into the existing
   `POST /api/prompts/<id>/reply` path (which already relays into the agent's
   session via tmux). Voice mode becomes an audio skin over the inbox that already
@@ -282,6 +295,11 @@ words** — score them against context, and emit
 `"Frobenius-normed meta equalizer"` → high-confidence match. Context is the
 corrector; STT never has to be perfect.
 
+When even the best candidate scores below a **hard confidence floor**, the template
+returns a `rephrase` outcome instead of an instruction — the Operator asks you to
+say it again rather than injecting a guess (§6). Better a re-ask than a wrong
+instruction shipped to an agent.
+
 ### C. Addressing / redirect detection
 
 Decides whether you named a different agent (overriding the default "reply to whoever
@@ -295,12 +313,15 @@ others) — see §4.
 ### E. Disambiguation phrasing
 
 When confidence from B/C is low, generates the short spoken clarifying question for
-the announcer voice ("Otter on infra, or Otto on web?").
+the announcer voice ("Otter on infra, or Otto on web?") or the rephrase request
+("Sorry, I didn't catch that — could you rephrase?").
 
 ### Design notes
 
-- **Confidence is first-class.** Every interpretation carries a confidence that gates
-  best-guess vs. spoken-confirm vs. visual fallback (§6) — no silent misroutes.
+- **Confidence is first-class, in bands.** Every interpretation carries a confidence
+  that gates the response: **high** → act (best-guess inject), **medium** →
+  spoken-confirm or visual fallback, **below the hard floor** → request rephrase and
+  inject nothing (§6). No silent misroutes, and no guessing on garbage.
 - **Single-purpose beats monolith.** Separate templates are independently tunable and
   testable; misparse-recovery quality can be regression-tested against a fixture set
   of `(raw STT, context) → expected instruction` pairs.
