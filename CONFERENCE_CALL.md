@@ -15,9 +15,12 @@ Turn the existing text-based monitoring room into a spoken "conference call":
 - Each agent instance speaks updates aloud in its own distinct voice.
 - Updates are short and speech-shaped — no long number lists, charts, paths, or
   special characters read aloud.
-- Agents take turns; you never hear two voices at once.
-- You reply by voice, naming an agent to direct your response, and the system
-  routes it to the right instance even when speech-to-text mangles the name.
+- Agents **bid for your attention** and take turns one at a time, chosen by the
+  Operator; you never hear two voices at once. Each granted turn is a brief update
+  on recent work plus a question about what to do next.
+- You reply by voice — by default to whoever just asked, or naming an agent to
+  redirect — and the system routes it to the right instance even when
+  speech-to-text mangles the name.
 
 Latency is **not** a priority for this use case, which deliberately shapes
 several decisions below (favor accuracy and deliberation over speed).
@@ -117,26 +120,49 @@ dependency-free):
 
 ---
 
-## 4. Turn-taking
+## 4. Turn-taking — an attention market
+
+The interaction is a **bidding loop**: agents bid for your attention, the Operator
+grants the floor to one at a time, and each granted turn has a fixed shape — a
+brief update on recent work followed by a question about what to do next. Every
+turn therefore ends by handing a decision back to you. This makes the whole call a
+sequence of self-contained decision requests rather than free-form chatter, which
+also sidesteps the spontaneity problem (agents never need to converse with each
+other to keep the call moving).
 
 The enabling fact: TTS playback consumes real wall-clock seconds and there's one
-human listening, so you *want* exactly one voice at a time regardless. Model it as
-a **centralized speak-queue with the Operator deciding order and the daemon
-enforcing serialization** — not as distributed floor-control (agents lack the
-human backchannel/prosody machinery for that).
+human listening, so you *want* exactly one voice at a time regardless. The Operator
+decides order; the daemon enforces serialization.
 
-- Agents don't speak directly; their updates become **floor requests**
-  (`{text, urgency, inReplyTo}`).
-- The Operator orders the queue (priority, who you addressed, coherence) and may
-  **batch several agents' updates into one briefing** rather than reading them as
-  separate robotic lines.
-- The daemon dispatches one, waits for `tts-done`, dispatches the next.
+The cycle:
+
+```
+agents bid ──► Operator selects one ──► agent speaks: [update] + [question]
+   ▲                                                          │
+   │                                                          ▼
+   └──── agent resumes work ◄── Operator routes answer ◄── you answer by voice
+```
+
+- **Bid.** An agent signals it wants the floor with a structured bid —
+  `{agentId, urgency, blockedOn, summary, question}`. A bid is essentially "I have
+  a decision point for you." An agent with nothing to ask doesn't bid (or bids
+  low).
+- **Selection.** The Operator picks the next speaker from outstanding bids, ranked
+  by urgency, staleness (don't starve a long-waiting agent), and whether the agent
+  is **blocking others**. One grant at a time.
+- **The turn (fixed format).** The granted agent delivers a short spoken update on
+  its recent work, then asks one clear question about what to do next. The
+  speechifier (§5) and Operator polishing enforce this two-part shape and keep it
+  brief.
+- **Your answer.** You reply by voice; the Operator routes it back to that agent
+  via prompt-injection (§6); the agent resumes work and may bid again later.
 - **You are privileged**: mic activity ducks/pauses the current utterance
-  (barge-in). The human always wins the floor.
+  (barge-in), and you can grab the floor or call on a specific agent out of band at
+  any time. The human always wins.
 
-Because agents only think when prompted, utterances are driven by the same
-lifecycle events that already animate the desks (tool use, status change, block,
-done) — plus anything the Operator explicitly wakes them to say.
+This maps directly onto the existing **NEEDS-YOU inbox**: a bid is a structured
+"agent is waiting on a human decision," and the turn's question is that decision
+point.
 
 ---
 
@@ -166,12 +192,14 @@ Speech-to-text output is noisy and unaddressed. Two questions: *who* are you
 talking to, and *what* did you actually say. The leverage is context the daemon
 already has.
 
-- **Addressing.** The spoken **name** is the primary signal. The Operator keeps a
-  `name → agentId` map for the active call and matches your spoken token with
-  **fuzzy + phonetic** matching (edit distance plus Metaphone/Soundex), so "quite
-  otter" still lands on Quiet Otter. When no name is heard, fall back to context:
-  who spoke last, and who is currently in the NEEDS-YOU inbox waiting on you (the
-  strongest prior — it's literally "agents waiting for a human reply").
+- **Addressing.** In the bidding loop the default target is **whoever just took
+  their turn and asked the question** — your answer is presumed to be a reply to
+  the open question unless you say otherwise. That gives the Operator a very strong
+  prior and makes most replies need no name at all. A spoken **name** overrides the
+  default to redirect to a different agent: the Operator keeps a `name → agentId`
+  map for the active call and matches your spoken token with **fuzzy + phonetic**
+  matching (edit distance plus Metaphone/Soundex), so "quite otter" still lands on
+  Quiet Otter. Remaining fallback: who is in the NEEDS-YOU inbox waiting on you.
 - **Cleanup & routing in one pass.** The Operator (an LLM) takes raw transcript +
   recent call transcript + roster + open prompts and produces structured
   `{targetAgentId, intent, cleanedText, confidence}`. It's robust to garble
