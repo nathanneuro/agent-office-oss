@@ -4,9 +4,12 @@ A voice extension for The Office: each agent gets a distinct synthesized voice,
 the human talks back by voice, and a hidden coordinator decides who speaks when
 and who your replies are addressed to.
 
-Status: **Phases 0–1 built; Phases 2–3 still design.** Phase 0 (speak-queue +
-speechifier) and Phase 1 (Piper voice sidecar, per-agent voices, announcer voice)
-are implemented; the Operator and your spoken replies (Phase 2+) remain design.
+Status: **Phases 0–1 built; Phase 2 in progress; Phase 3 design.** Phase 0
+(speak-queue + speechifier) and Phase 1 (Piper voice sidecar, per-agent voices,
+announcer voice) are implemented. Phase 2a — the Operator coordinator loop
+(bidding, arbitration, brevity edit, transcript→route injection, OpenRouter brain
+with a deterministic fallback) — is implemented; Phase 2b (mic capture + Whisper
+STT + barge-in in the browser) is next.
 
 ---
 
@@ -392,9 +395,14 @@ Each phase is independently useful.
   voice introducing each turn ("Blue Otter"). Falls back to Web Speech when the
   sidecar/model is absent. (Announcing is just TTS of a name — no parsing — so it
   lands here, before the mic exists.) Curated call-names still TODO.
-- **Phase 2 — you talk back (the meat).** Mic + Whisper + barge-in/ducking +
-  the Operator (hidden coordinator) doing parsing/addressing/routing, wired into
-  NEEDS-YOU.
+- **Phase 2 — you talk back (the meat).** _2a [built]_: the Operator
+  (`operator.mjs`, hidden daemon-managed subprocess) — agents bid
+  (`/api/call/bid`), it arbitrates, brevity-edits each turn, and routes the
+  human's transcript into agent sessions (`/api/call/route`, with the standing
+  succinctness note). Brain is OpenRouter (`OPENROUTER_API_KEY`,
+  `OFFICE_OPERATOR_MODEL`) with a deterministic no-key fallback; enabled via
+  `OFFICE_OPERATOR=1`. _2b [next]_: browser mic capture + Whisper STT sidecar +
+  barge-in/ducking feeding `/api/call/transcript`.
 - **Phase 3 — agent-to-agent dialogue.** The expensive event-driven-agent
   problem; easier here because the Operator can prompt agents to respond to each
   other, not just to you. Decide later if it's worth it.

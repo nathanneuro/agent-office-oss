@@ -25,10 +25,19 @@ const argv = process.argv.slice(2);
 function help() {
   console.log(
     'node office-call.mjs speak <message...>\n'
+    + 'node office-call.mjs bid <question...> [--summary "..."] [--urgency high|normal|low]\n'
     + 'node office-call.mjs state\n'
     + '\n'
-    + 'If <message> is omitted, stdin is used.'
+    + 'If <message> is omitted, stdin is used.\n'
+    + '`bid` asks the Operator for a turn; `speak` queues an utterance directly.'
   );
+}
+
+function takeOpt(args, name) {
+  const i = args.indexOf(name);
+  if (i === -1) return { value: null, rest: args };
+  const value = args[i + 1] || '';
+  return { value, rest: args.slice(0, i).concat(args.slice(i + 2)) };
 }
 
 function readJson(file) {
@@ -79,6 +88,28 @@ if (cmd === 'state') {
     console.log('speaking: (idle)');
   }
   console.log(`queued: ${state.queued}`);
+  process.exit(0);
+}
+
+if (cmd === 'bid') {
+  let rest = argv.slice(1);
+  const summaryOpt = takeOpt(rest, '--summary'); rest = summaryOpt.rest;
+  const urgencyOpt = takeOpt(rest, '--urgency'); rest = urgencyOpt.rest;
+  const question = readMessage(rest);
+  if (!question) { console.error('office-call: question required.'); process.exit(1); }
+  const me = resolveSelf();
+  const res = await j('/api/call/bid', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      agentId: me.sessionId || me.name,
+      agentName: me.name,
+      question,
+      summary: summaryOpt.value || '',
+      urgency: urgencyOpt.value || 'normal',
+    }),
+  });
+  console.log(`bid placed (${res.bid.urgency}) · the Operator will grant a turn`);
   process.exit(0);
 }
 

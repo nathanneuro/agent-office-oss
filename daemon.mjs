@@ -40,6 +40,9 @@ const COLLAB_RECENT_LIMIT = 8;
 const CHANNEL_RECENT_LIMIT = 12;
 const AUTO_OBSERVE_CODEX = process.env.OFFICE_AUTO_OBSERVE_CODEX !== '0';
 const CODEX_OBSERVER_RESTART_MS = 5000;
+// Conference-call Operator (operator.mjs): opt-in hidden coordinator subprocess.
+const OFFICE_OPERATOR = process.env.OFFICE_OPERATOR === '1';
+const OPERATOR_RESTART_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Agent state
@@ -57,6 +60,8 @@ const runtimes = new RuntimeManager(PORT);
 const TASK_PRIORITY_SET = new Set(TASK_PRIORITY);
 let codexObserverChild = null;
 let codexObserverRetry = null;
+let operatorChild = null;
+let operatorRetry = null;
 let shuttingDown = false;
 
 function getCodexObserverStatus() {
@@ -114,6 +119,51 @@ function stopCodexObserver() {
   }
   if (codexObserverChild && codexObserverChild.exitCode === null) {
     try { codexObserverChild.kill('SIGTERM'); } catch {}
+  }
+}
+
+// Hidden Operator coordinator (CONFERENCE_CALL.md §3.2): daemon-managed
+// subprocess with auto-restart, mirroring the codex observer. Opt-in via
+// OFFICE_OPERATOR=1 so the call feature stays off by default.
+function startOperator() {
+  if (!OFFICE_OPERATOR || shuttingDown) return;
+  if (operatorChild && operatorChild.exitCode === null) return;
+  const child = cp.spawn(process.execPath, [path.join(__dir, 'operator.mjs')], {
+    cwd: __dir,
+    env: { ...process.env, OFFICE_PORT: String(PORT) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  operatorChild = child;
+  child.stdout.on('data', (buf) => {
+    const line = String(buf || '').trim();
+    if (line) console.log(`[operator] ${line}`);
+  });
+  child.stderr.on('data', (buf) => {
+    const line = String(buf || '').trim();
+    if (line) console.warn(`[operator] ${line}`);
+  });
+  child.on('exit', (code, signal) => {
+    if (operatorChild === child) operatorChild = null;
+    if (shuttingDown) return;
+    if (operatorRetry) clearTimeout(operatorRetry);
+    console.warn('[operator] exited'
+      + (code !== null ? ` with code ${code}` : '')
+      + (signal ? ` (${signal})` : '')
+      + '; retrying.');
+    operatorRetry = setTimeout(() => {
+      operatorRetry = null;
+      startOperator();
+    }, OPERATOR_RESTART_MS);
+  });
+}
+
+function stopOperator() {
+  if (operatorRetry) {
+    clearTimeout(operatorRetry);
+    operatorRetry = null;
+  }
+  if (operatorChild && operatorChild.exitCode === null) {
+    try { operatorChild.kill('SIGTERM'); } catch {}
   }
 }
 
@@ -1567,7 +1617,7 @@ function handleUpgrade(req, socket) {
     collabRecent: getCollabRecent(null, COLLAB_RECENT_LIMIT),
     prompts: [...prompts.values()].map(pubPrompt),
     commsOverview: getCommsOverview(),
-    call: call.state(),
+    call: callView(),
   })));
   sendTasksSnapshot(socket);
   socket.on('data', (b) => {
@@ -1580,17 +1630,29 @@ function handleUpgrade(req, socket) {
 }
 
 // ---------------------------------------------------------------------------
-// Conference call — speak-queue (CONFERENCE_CALL.md §4, Phase 0).
-// One voice at a time: the daemon hands the browser the current utterance,
-// the browser plays it and acks `tts-done`, the daemon advances. A watchdog
-// auto-advances if no browser is listening so the queue never wedges.
+// Conference call — speak-queue + bidding/routing (CONFERENCE_CALL.md §4, §6).
+// One voice at a time: the daemon hands the browser the current utterance, the
+// browser plays it and acks `tts-done`, the daemon advances. A watchdog auto-
+// advances if no browser is listening so the queue never wedges. Agents bid for
+// the floor; the Operator (operator.mjs) selects, speaks, and routes the human's
+// transcribed replies back into agent sessions.
 // ---------------------------------------------------------------------------
 const VOICE_PORT = Number(process.env.OFFICE_VOICE_PORT || 4318);
+// Standing note appended to every routed instruction so agents stay succinct (§6).
+const VOCAL_META = '(User is on the vocal interface. Please be succinct.)';
 const call = new CallQueue();
 let callWatchdog = null;
+const callBids = new Map();        // agentId -> bid (latest replaces older)
+const callTranscripts = [];        // human STT awaiting the Operator (drained)
 
+function listBids() {
+  return [...callBids.values()].sort((a, b) => b.createdAt - a.createdAt);
+}
+function callView() {
+  return { ...call.state(), bids: listBids() };
+}
 function broadcastCall() {
-  broadcast({ type: EV.CALL, call: call.state() });
+  broadcast({ type: EV.CALL, call: callView() });
 }
 function clearCallWatchdog() {
   if (callWatchdog) { clearTimeout(callWatchdog); callWatchdog = null; }
@@ -1609,20 +1671,20 @@ function pumpCall() {
   }
   broadcastCall();
 }
-function enqueueUtterance({ agentId, agentName, text, urgency, voice } = {}) {
+function enqueueUtterance({ agentId, agentName, text, urgency, voice, operator } = {}) {
   const speech = speechify(text);
   if (!speech) return null;
-  const name = agentName || 'Agent';
+  const name = operator ? 'Operator' : (agentName || 'Agent');
   const item = {
     id: 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    agentId: agentId || null,
+    agentId: operator ? null : (agentId || null),
     agentName: name,
     text: String(text),
     speech,
-    voice: voiceFor(agentId, voice),
-    // The Operator's announcer voice introduces each turn (Phase 1). The
-    // browser plays this before the body, then acks once at the end.
-    announce: { text: name, voice: ANNOUNCER_VOICE },
+    // Operator speech (announcements, confirmations, rephrase prompts) uses the
+    // reserved announcer voice and skips the name-announce — it IS the announcer.
+    voice: operator ? ANNOUNCER_VOICE : voiceFor(agentId, voice),
+    announce: operator ? null : { text: name, voice: ANNOUNCER_VOICE },
     urgency: urgency || 'normal',
     createdAt: Date.now(),
   };
@@ -1637,6 +1699,72 @@ function finishCall(id) {
   pumpCall();
   return true;
 }
+
+// A bid is the structured "I want the floor" / "I need a decision" (§4). Latest
+// bid per agent wins; the Operator clears it when the turn is granted.
+function submitBid({ agentId, agentName, urgency, summary, question, options, blockedOn } = {}) {
+  if (!agentId) return null;
+  const bid = {
+    id: 'b_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    agentId,
+    agentName: agentName || 'Agent',
+    urgency: urgency || 'normal',
+    summary: summary ? String(summary) : '',
+    question: question ? String(question) : '',
+    options: Array.isArray(options) ? options.map(String) : [],
+    blockedOn: blockedOn ? String(blockedOn) : '',
+    createdAt: Date.now(),
+  };
+  callBids.set(agentId, bid);
+  broadcastCall();
+  return bid;
+}
+function clearBid(agentId) {
+  const had = callBids.delete(agentId);
+  if (had) broadcastCall();
+  return had;
+}
+
+// Resolve a routing target by id (preferred) or fuzzy name (§6 addressing).
+function resolveCallTarget({ targetAgentId, targetName } = {}) {
+  if (targetAgentId && agents.has(targetAgentId)) return agents.get(targetAgentId);
+  const needle = String(targetName || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (!needle) return null;
+  let best = null;
+  for (const a of agents.values()) {
+    const norm = String(a.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (norm === needle) return a;
+    if (!best && norm.includes(needle)) best = a;
+  }
+  return best;
+}
+
+// Inject the Operator's processed instruction into an agent's session (§6). The
+// agent receives clean text + the standing succinctness note — never raw STT.
+function routeToAgent({ targetAgentId, targetName, instruction, appendMeta } = {}) {
+  const text = String(instruction || '').trim();
+  if (!text) return { error: 'instruction required', status: 400 };
+  const agent = resolveCallTarget({ targetAgentId, targetName });
+  if (!agent) return { error: 'target agent not found', status: 404 };
+  const session = resolveAgentRuntimeSession(agent);
+  const payload = appendMeta === false ? text : `${text}\n\n${VOCAL_META}`;
+  let delivered = false;
+  if (session) {
+    try {
+      runtimes.sendInput(session.id, relayPayloadForSession(session, payload), { enter: true });
+      delivered = true;
+    } catch { /* session may have died */ }
+  }
+  return {
+    ok: true,
+    delivered,
+    targetAgentId: agent.id,
+    targetName: agent.name,
+    targetSession: session ? session.id : null,
+    text: payload,
+  };
+}
+
 
 // ---------------------------------------------------------------------------
 // Project context for the filing cabinet. SAFE: never reads .env contents,
@@ -1941,7 +2069,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === 'GET' && pathname === '/api/call/state') {
-    sendJson(res, 200, call.state());
+    sendJson(res, 200, callView());
     return;
   }
   if (req.method === 'POST' && pathname === '/api/call/speak') {
@@ -1954,7 +2082,7 @@ const server = http.createServer(async (req, res) => {
     }
     const item = enqueueUtterance(body);
     if (!item) { sendJson(res, 400, { error: 'nothing speakable after sanitizing' }); return; }
-    sendJson(res, 200, { ok: true, id: item.id, speech: item.speech, state: call.state() });
+    sendJson(res, 200, { ok: true, id: item.id, speech: item.speech, state: callView() });
     return;
   }
   if (req.method === 'POST' && pathname === '/api/call/ack') {
@@ -1962,6 +2090,59 @@ const server = http.createServer(async (req, res) => {
     try { body = await readJsonBody(req); }
     catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
     sendJson(res, 200, { ok: finishCall(body.id) });
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/call/bids') {
+    sendJson(res, 200, { bids: listBids() });
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/call/bid') {
+    let body;
+    try { body = await readJsonBody(req); }
+    catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+    if (!body.agentId) { sendJson(res, 400, { error: 'agentId required' }); return; }
+    const bid = submitBid(body);
+    sendJson(res, 200, { ok: true, bid });
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/call/bid/clear') {
+    let body;
+    try { body = await readJsonBody(req); }
+    catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+    sendJson(res, 200, { ok: clearBid(body.agentId) });
+    return;
+  }
+  // Browser posts the human's raw STT here; the Operator drains it (GET below).
+  if (req.method === 'POST' && pathname === '/api/call/transcript') {
+    let body;
+    try { body = await readJsonBody(req); }
+    catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+    if (!body.text || !String(body.text).trim()) {
+      sendJson(res, 400, { error: 'text required' });
+      return;
+    }
+    callTranscripts.push({
+      id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      text: String(body.text),
+      confidence: typeof body.confidence === 'number' ? body.confidence : null,
+      createdAt: Date.now(),
+    });
+    sendJson(res, 200, { ok: true, pending: callTranscripts.length });
+    return;
+  }
+  // Operator drains pending transcripts (returns and clears).
+  if (req.method === 'GET' && pathname === '/api/call/transcripts') {
+    const drained = callTranscripts.splice(0, callTranscripts.length);
+    sendJson(res, 200, { transcripts: drained });
+    return;
+  }
+  // Operator routes a processed instruction into an agent's session (§6).
+  if (req.method === 'POST' && pathname === '/api/call/route') {
+    let body;
+    try { body = await readJsonBody(req); }
+    catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+    const result = routeToAgent(body);
+    sendJson(res, result.status || 200, result);
     return;
   }
   if (req.method === 'GET' && pathname === '/api/channels') {
@@ -2077,16 +2258,21 @@ setInterval(() => {
 
 server.listen(PORT, () => {
   startCodexObserver();
+  startOperator();
   console.log(`\n  The Office is open  →  http://localhost:${PORT}\n` +
     `  hook ingest:  POST http://localhost:${PORT}/hook\n` +
     `  state debug:  http://localhost:${PORT}/state\n`);
 });
 
 process.on('SIGINT', () => {
+  shuttingDown = true;
   stopCodexObserver();
+  stopOperator();
   process.exit(0);
 });
 process.on('SIGTERM', () => {
+  shuttingDown = true;
   stopCodexObserver();
+  stopOperator();
   process.exit(0);
 });
