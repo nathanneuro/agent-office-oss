@@ -211,9 +211,17 @@ already has.
     you say "no, the other one" and it re-routes.
   - **Visual fallback** for true ambiguity: surface a text prompt on screen
     (NEEDS-YOU overlay) rather than interrupting the audio.
-- **Payoff:** a routed reply to a blocked agent drops straight into the existing
-  `POST /api/prompts/<id>/reply` path. Voice mode becomes an audio skin over the
-  inbox that already exists.
+- **What the agent receives is processed text, never raw speech.** The pipeline is
+  `your voice → STT → Operator (clean + interpret + resolve references) → text
+  injected into the target agent's session`. The agent only ever sees the
+  Operator's polished prompt — a clear instruction in plain text — not the audio
+  and not the garbled transcript. The Operator absorbs STT errors, expands terse
+  spoken answers ("yeah do the first one" → "Proceed with option A: the in-place
+  migration"), and attaches any context the agent needs to act.
+- **Payoff:** that processed text drops straight into the existing
+  `POST /api/prompts/<id>/reply` path (which already relays into the agent's
+  session via tmux). Voice mode becomes an audio skin over the inbox that already
+  exists.
 
 ---
 
