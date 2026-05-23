@@ -183,6 +183,30 @@ This maps directly onto the existing **NEEDS-YOU inbox**: a bid is a structured
 "agent is waiting on a human decision," and the turn's question is that decision
 point.
 
+### Question forms
+
+Most turns fit one of three canonical shapes. Standardizing them matters because
+the question *type* is itself the strongest prior for parsing your answer (§6/§7B)
+— it tells the Operator what the answer space looks like before you even speak.
+
+1. **Proceed / pause** — *"I've done X. Y is up next. Pause or proceed?"* Answer
+   space is a tiny fixed vocabulary (go / hold / stop). Easiest to parse; "yep",
+   "go ahead", "hang on" all resolve cleanly.
+2. **Multiple choice** — *"I've done X. Which next? One, W. Two, Y. Three, Z."*
+   Answer space is the enumerated options. The Operator matches your reply against
+   them by **ordinal or content** ("the second one" / "do Y" / "number three"),
+   which makes garbled speech easy to recover — it only has to land on one of a
+   known short list.
+3. **Open / diagnostic** — *"I tried X and saw result Y. What next?"* Open answer
+   space — the hardest case, where full speech-recovery (§7B) and the rephrase
+   floor earn their keep.
+
+Note this is the one place short enumerations *are* spoken aloud (contra §5's
+"no lists"): a 2–4 option choice is the actual decision, so the Operator renders it
+as a clean spoken enumeration rather than stripping it. The agent emits the choice
+structurally (`{update, question, options:[…]}`); the Operator speaks it and uses
+the same options list to bound answer parsing.
+
 ---
 
 ## 5. Speech-appropriate updates
@@ -282,7 +306,9 @@ the raw transcript as noisy and reasons *explicitly* about how speech-to-text co
 have mangled what you actually said, then picks the most plausible intended meaning
 given context. Inputs deliberately include the corrective context:
 
-- the **open question** you're answering,
+- the **open question** you're answering — including its **type and answer space**
+  (proceed/pause vocabulary, or the enumerated options list), per §4's question
+  forms; this is the strongest single constraint on what you could have meant,
 - the **target agent's domain vocabulary** (e.g. its open component names),
 - the **roster** (for redirect names),
 - recent call transcript.
