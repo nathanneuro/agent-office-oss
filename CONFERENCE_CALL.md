@@ -45,15 +45,16 @@ The design therefore separates cleanly:
   speech-to-text. It's the only place with WebAudio / MediaRecorder.
 - **The daemon is the chairperson.** It already holds global state and broadcasts
   to everyone. It becomes the floor manager that enforces one-voice-at-a-time.
-- **The Operator (new) is the brain.** A hidden, voiceless coordinator agent that
-  parses your speech, decides who you addressed, and prompts the other agents.
+- **The Operator (new) is the brain.** A hidden coordinator agent that parses your
+  speech, decides who you addressed, prompts the other agents — and speaks in its
+  own **announcer voice** to introduce whoever is about to take the floor.
 
 ```
 agents (text only) ──WS──► daemon (floor mgr) ──WS──► browser (TTS out / STT in) ──► you
         ▲                        ▲                          │
         │                        │                          │
-   prompt-injection         Operator (hidden, ◄─────────────┘
-   (tmux relay)             voiceless coordinator)
+   prompt-injection         Operator (hidden coordinator ◄──┘
+   (tmux relay)             with an announcer voice)
 ```
 
 ---
@@ -74,16 +75,20 @@ No "thinking" here; it stays the zero-dependency, mechanical core.
 - Provides a **dumb fallback**: if the Operator subprocess is down, the daemon
   reads NEEDS-YOU items aloud verbatim so the call doesn't go deaf.
 
-### 3.2 Operator — hidden, voiceless coordinator
+### 3.2 Operator — hidden coordinator with an announcer voice
 
 A new agent whose sole role is to process inputs and appropriately prompt the
 others. It is the one continuously-live participant.
 
 - **Hidden service agent.** Excluded from the `agents` projection the daemon
   broadcasts (a `hidden: true` flag filtered in `pub()`): no desk, no character,
-  no presence animation, does not consume one of the 12 desk slots, never
-  announced on the call, never a target for addressing.
-- **Voiceless.** Never produces TTS. You only ever hear real participants.
+  no presence animation, does not consume one of the 12 desk slots, never a
+  participant and never itself a target for addressing.
+- **Has an announcer voice.** A distinct MC voice, used to introduce the next
+  speaker before they talk ("Blue Otter") — an audible turn cue that tells you who
+  is about to speak and therefore who your next reply will go to. It does not hold
+  participant-style conversations; it announces, and may optionally voice
+  disambiguation (§6). All other agents still speak in their own voices.
 - **Privileged, role-gated.** It alone may inject prompts into other agents'
   sessions and reorder the speak-queue. The daemon accepts those privileged calls
   only when they carry the Operator's reserved identity/token, never from a normal
@@ -137,10 +142,21 @@ decides order; the daemon enforces serialization.
 The cycle:
 
 ```
-agents bid ──► Operator selects one ──► agent speaks: [update] + [question]
-   ▲                                                          │
-   │                                                          ▼
+agents bid ──► Operator selects + announces ──► agent speaks: [update] + [question]
+   ▲              ("Blue Otter")                                │
+   │                                                            ▼
    └──── agent resumes work ◄── Operator routes answer ◄── you answer by voice
+```
+
+Worked example:
+
+```
+Operator:   "Blue Otter."
+Blue Otter: "I completed building the four-dimensional keyboard interface.
+             Which component next?"
+You:        "The Frobenius-normed meta equalizer."
+Operator:   (resolves the spoken phrase against Blue Otter's open components,
+             then injects as text) → "Build the Frobenius-normed meta equalizer next."
 ```
 
 - **Bid.** An agent signals it wants the floor with a structured bid —
@@ -150,6 +166,9 @@ agents bid ──► Operator selects one ──► agent speaks: [update] + [qu
 - **Selection.** The Operator picks the next speaker from outstanding bids, ranked
   by urgency, staleness (don't starve a long-waiting agent), and whether the agent
   is **blocking others**. One grant at a time.
+- **Announce.** The Operator speaks the chosen agent's name in its announcer voice
+  ("Blue Otter") as the turn-handoff cue, then releases that agent's utterance to
+  the speak-queue.
 - **The turn (fixed format).** The granted agent delivers a short spoken update on
   its recent work, then asks one clear question about what to do next. The
   speechifier (§5) and Operator polishing enforce this two-part shape and keep it
@@ -204,13 +223,15 @@ already has.
   recent call transcript + roster + open prompts and produces structured
   `{targetAgentId, intent, cleanedText, confidence}`. It's robust to garble
   *because* it has the context to disambiguate.
-- **No spoken confirmation** (the Operator is voiceless). Disambiguation resolves
-  two silent ways:
+- **Disambiguation.** Because the Operator now has a voice, it can resolve
+  uncertainty three ways, cheapest first:
   - **Best-guess + voice-correctable** (happy path): route to the most likely
     target, inject the prompt, and the UI highlights which agent got it. If wrong,
     you say "no, the other one" and it re-routes.
-  - **Visual fallback** for true ambiguity: surface a text prompt on screen
-    (NEEDS-YOU overlay) rather than interrupting the audio.
+  - **Spoken confirmation** for genuine ambiguity: the announcer voice asks a quick
+    "Otter on infra, or Otto on web?" rather than guessing.
+  - **Visual fallback**: surface a text prompt on screen (NEEDS-YOU overlay) when
+    you'd rather not interrupt the audio.
 - **What the agent receives is processed text, never raw speech.** The pipeline is
   `your voice → STT → Operator (clean + interpret + resolve references) → text
   injected into the target agent's session`. The agent only ever sees the
@@ -254,7 +275,9 @@ Each phase is independently useful.
   speak-queue + browser reads utterances aloud with one voice. De-risks
   turn-taking before any audio model exists.
 - **Phase 1 — distinct voices.** Piper sidecar, per-agent voice from profiles;
-  curated call-names + join announcements.
+  curated call-names; the Operator's announcer voice introducing each turn
+  ("Blue Otter"). (Announcing is just TTS of a name — it needs no parsing, so it
+  lands here, before the mic exists.)
 - **Phase 2 — you talk back (the meat).** Mic + Whisper + barge-in/ducking +
   the Operator (hidden coordinator) doing parsing/addressing/routing, wired into
   NEEDS-YOU.
