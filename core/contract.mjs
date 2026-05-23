@@ -15,6 +15,7 @@ export const EV = Object.freeze({
   COMMS_OVERVIEW: 'comms_overview', // { overview:CommsOverview } additive summary
   RUNTIMES: 'runtimes',   // { runtimes:[RuntimeInfo] }   [PROPOSED]
   TASKS:    'tasks',      // { deptId, tasks:[Task] }     [PROPOSED] Kanban
+  CALL:     'call',       // { call:CallState }           conference-call speak-queue
 });
 
 /* ---- Status vocabulary (single source of truth) ------------------------ */

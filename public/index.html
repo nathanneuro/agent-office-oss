@@ -687,6 +687,30 @@ class Agent{
       if(this.leaveT>=1)agents.delete(this.id);}}
 }
 let wantAgent=new URL(location).searchParams.get('agent')||null;
+// Conference call (Phase 0): speak the current utterance via the browser's
+// built-in voice, then ack so the daemon advances the speak-queue. Browsers
+// gate speech behind a user gesture; until then the daemon watchdog advances.
+const callPlayback={spokenIds:new Set()};
+function ackUtterance(id){
+  fetch('/api/call/ack',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({id})}).catch(()=>{});}
+function speakUtterance(item){
+  const text=item.speech||item.text||'';
+  if(!('speechSynthesis'in window)||!text){ackUtterance(item.id);return;}
+  try{
+    const u=new SpeechSynthesisUtterance(text);
+    let done=false;const finish=()=>{if(done)return;done=true;ackUtterance(item.id);};
+    u.onend=finish;u.onerror=finish;
+    window.speechSynthesis.speak(u);
+  }catch{ackUtterance(item.id);}}
+function handleCall(state){
+  if(!state)return;
+  const cur=state.current;
+  if(cur&&!callPlayback.spokenIds.has(cur.id)){
+    callPlayback.spokenIds.add(cur.id);
+    speakUtterance(cur);
+  }}
 function connect(){const ws=new WebSocket(
   (location.protocol==='https:'?'wss://':'ws://')+location.host);
   ws.onopen=()=>{connLive=true;retry=0;};
@@ -700,7 +724,8 @@ function connect(){const ws=new WebSocket(
       if(m.commsOverview){
         rememberCollabPosts(m.commsOverview.recentCollab,{primeOnly:true});
         setCommsOverviewState(m.commsOverview);
-      }}
+      }
+      if(m.call)handleCall(m.call);}
     else if(m.type==='update'){const a=agents.get(m.agent.id);
       if(a)a.apply(m.agent);else agents.set(m.agent.id,new Agent(m.agent));}
     else if(m.type==='remove'){const a=agents.get(m.id);
@@ -720,6 +745,7 @@ function connect(){const ws=new WebSocket(
       setCommsOverviewState(m.overview);
       if(commsState.visible)refreshComms(true);}
     else if(m.type==='tasks'){rememberTasks(m.deptId,m.tasks);setTaskState(m.deptId,m.tasks);}
+    else if(m.type==='call'){handleCall(m.call);}
     if(wantAgent&&agents.has(wantAgent)){view='desk';
       deskAgentId=wantAgent;wantAgent=null;}};}
 function byDept(){const m=new Map();

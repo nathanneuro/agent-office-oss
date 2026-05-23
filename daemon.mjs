@@ -24,6 +24,8 @@ import {
 } from './core/contract.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
 import { TaskStore } from './task-store.mjs';
+import { CallQueue } from './call-store.mjs';
+import { speechify } from './call-speechifier.mjs';
 
 const PORT = Number(process.env.OFFICE_PORT || 4317);
 const __dir = path.dirname(fileURLToPath(import.meta.url));
@@ -1564,6 +1566,7 @@ function handleUpgrade(req, socket) {
     collabRecent: getCollabRecent(null, COLLAB_RECENT_LIMIT),
     prompts: [...prompts.values()].map(pubPrompt),
     commsOverview: getCommsOverview(),
+    call: call.state(),
   })));
   sendTasksSnapshot(socket);
   socket.on('data', (b) => {
@@ -1573,6 +1576,57 @@ function handleUpgrade(req, socket) {
   const drop = () => clients.delete(socket);
   socket.on('close', drop);
   socket.on('error', drop);
+}
+
+// ---------------------------------------------------------------------------
+// Conference call — speak-queue (CONFERENCE_CALL.md §4, Phase 0).
+// One voice at a time: the daemon hands the browser the current utterance,
+// the browser plays it and acks `tts-done`, the daemon advances. A watchdog
+// auto-advances if no browser is listening so the queue never wedges.
+// ---------------------------------------------------------------------------
+const call = new CallQueue();
+let callWatchdog = null;
+
+function broadcastCall() {
+  broadcast({ type: EV.CALL, call: call.state() });
+}
+function clearCallWatchdog() {
+  if (callWatchdog) { clearTimeout(callWatchdog); callWatchdog = null; }
+}
+function armCallWatchdog(item) {
+  clearCallWatchdog();
+  const ms = Math.min(60000, 4000 + (item.speech ? item.speech.length : 0) * 80);
+  callWatchdog = setTimeout(() => { callWatchdog = null; finishCall(item.id); }, ms);
+}
+function pumpCall() {
+  if (!call.current) {
+    const next = call.advance();
+    if (next) armCallWatchdog(next);
+  }
+  broadcastCall();
+}
+function enqueueUtterance({ agentId, agentName, text, urgency } = {}) {
+  const speech = speechify(text);
+  if (!speech) return null;
+  const item = {
+    id: 'u_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    agentId: agentId || null,
+    agentName: agentName || 'Agent',
+    text: String(text),
+    speech,
+    urgency: urgency || 'normal',
+    createdAt: Date.now(),
+  };
+  call.enqueue(item);
+  pumpCall();
+  return item;
+}
+function finishCall(id) {
+  const done = call.ack(id);
+  if (!done) return false;
+  clearCallWatchdog();
+  pumpCall();
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1871,6 +1925,30 @@ const server = http.createServer(async (req, res) => {
     catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
     const result = sendLeadDirectMessage(body);
     sendJson(res, result.status || 200, result);
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/call/state') {
+    sendJson(res, 200, call.state());
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/call/speak') {
+    let body;
+    try { body = await readJsonBody(req); }
+    catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+    if (!body.text || !String(body.text).trim()) {
+      sendJson(res, 400, { error: 'text required' });
+      return;
+    }
+    const item = enqueueUtterance(body);
+    if (!item) { sendJson(res, 400, { error: 'nothing speakable after sanitizing' }); return; }
+    sendJson(res, 200, { ok: true, id: item.id, speech: item.speech, state: call.state() });
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/call/ack') {
+    let body;
+    try { body = await readJsonBody(req); }
+    catch { sendJson(res, 400, { error: 'Invalid JSON body' }); return; }
+    sendJson(res, 200, { ok: finishCall(body.id) });
     return;
   }
   if (req.method === 'GET' && pathname === '/api/channels') {
