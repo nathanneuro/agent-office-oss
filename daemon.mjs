@@ -1638,6 +1638,7 @@ function handleUpgrade(req, socket) {
 // transcribed replies back into agent sessions.
 // ---------------------------------------------------------------------------
 const VOICE_PORT = Number(process.env.OFFICE_VOICE_PORT || 4318);
+const STT_PORT = Number(process.env.OFFICE_STT_PORT || 4319);
 // Standing note appended to every routed instruction so agents stay succinct (§6).
 const VOCAL_META = '(User is on the vocal interface. Please be succinct.)';
 const call = new CallQueue();
@@ -2065,7 +2066,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (req.method === 'GET' && pathname === '/api/call/config') {
-    sendJson(res, 200, { voicePort: VOICE_PORT, announcerVoice: ANNOUNCER_VOICE });
+    sendJson(res, 200, { voicePort: VOICE_PORT, sttPort: STT_PORT, announcerVoice: ANNOUNCER_VOICE });
     return;
   }
   if (req.method === 'GET' && pathname === '/api/call/state') {

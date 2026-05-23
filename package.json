@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "node daemon.mjs",
     "voice": "node voice-sidecar.mjs",
+    "stt": "node stt-sidecar.mjs",
     "demo": "node demo.mjs",
     "simulate": "node simulate.mjs",
     "doctor": "node doctor.mjs",

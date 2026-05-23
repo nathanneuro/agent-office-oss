@@ -4,12 +4,14 @@ A voice extension for The Office: each agent gets a distinct synthesized voice,
 the human talks back by voice, and a hidden coordinator decides who speaks when
 and who your replies are addressed to.
 
-Status: **Phases 0–1 built; Phase 2 in progress; Phase 3 design.** Phase 0
-(speak-queue + speechifier) and Phase 1 (Piper voice sidecar, per-agent voices,
-announcer voice) are implemented. Phase 2a — the Operator coordinator loop
-(bidding, arbitration, brevity edit, transcript→route injection, OpenRouter brain
-with a deterministic fallback) — is implemented; Phase 2b (mic capture + Whisper
-STT + barge-in in the browser) is next.
+Status: **Phases 0–2 built; Phase 3 design.** Phase 0 (speak-queue + speechifier),
+Phase 1 (Piper voice sidecar, per-agent voices, announcer voice), and Phase 2 (the
+Operator coordinator + bidding + routing, plus browser mic capture and a Whisper
+STT sidecar with barge-in) are implemented. The Operator brain runs on OpenRouter
+with a deterministic no-key fallback. Phase 3 (agent-to-agent dialogue) remains
+design. Note: the audio paths (Piper, Whisper, in-browser mic/playback) are built
+with graceful Web Speech fallbacks but were not exercised end to end in CI — they
+need a real browser plus the model binaries to verify live.
 
 ---
 
@@ -401,8 +403,10 @@ Each phase is independently useful.
   human's transcript into agent sessions (`/api/call/route`, with the standing
   succinctness note). Brain is OpenRouter (`OPENROUTER_API_KEY`,
   `OFFICE_OPERATOR_MODEL`) with a deterministic no-key fallback; enabled via
-  `OFFICE_OPERATOR=1`. _2b [next]_: browser mic capture + Whisper STT sidecar +
-  barge-in/ducking feeding `/api/call/transcript`.
+  `OFFICE_OPERATOR=1`. _2b [built]_: browser push-to-talk mic capture + Whisper STT
+  sidecar (`stt-sidecar.mjs`, `npm run stt`) + barge-in (mic ducks the current
+  utterance), feeding `/api/call/transcript`. Falls back to the Web Speech
+  recognition API when the sidecar is down.
 - **Phase 3 — agent-to-agent dialogue.** The expensive event-driven-agent
   problem; easier here because the Operator can prompt agents to respond to each
   other, not just to you. Decide later if it's worth it.

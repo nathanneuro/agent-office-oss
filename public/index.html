@@ -693,18 +693,25 @@ let wantAgent=new URL(location).searchParams.get('agent')||null;
 // sidecar when it's up; otherwise we fall back to the browser's Web Speech
 // voice. Browsers gate audio behind a user gesture; until then the daemon
 // watchdog advances on its own.
-const callPlayback={spokenIds:new Set(),voiceBase:null,sidecar:false};
+const callPlayback={spokenIds:new Set(),voiceBase:null,sidecar:false,
+  sttBase:null,stt:false,audioEl:null,recording:false,rec:null,chunks:[],recog:null};
 let callVoiceInit=null;
 async function initCallVoice(){
-  try{
-    const cfg=await fetch('/api/call/config').then(r=>r.json());
-    if(cfg&&cfg.voicePort)
-      callPlayback.voiceBase=location.protocol+'//'+location.hostname+':'+cfg.voicePort;
-  }catch{}
+  let cfg=null;
+  try{cfg=await fetch('/api/call/config').then(r=>r.json());}catch{}
+  if(cfg&&cfg.voicePort)
+    callPlayback.voiceBase=location.protocol+'//'+location.hostname+':'+cfg.voicePort;
+  if(cfg&&cfg.sttPort)
+    callPlayback.sttBase=location.protocol+'//'+location.hostname+':'+cfg.sttPort;
   if(callPlayback.voiceBase){
     try{const h=await fetch(callPlayback.voiceBase+'/health').then(r=>r.json());
       callPlayback.sidecar=!!(h&&h.piper);}catch{callPlayback.sidecar=false;}
-  }}
+  }
+  if(callPlayback.sttBase){
+    try{const h=await fetch(callPlayback.sttBase+'/health').then(r=>r.json());
+      callPlayback.stt=!!(h&&h.stt);}catch{callPlayback.stt=false;}
+  }
+  mountMicButton();}
 function ensureCallVoice(){return callVoiceInit||(callVoiceInit=initCallVoice());}
 function ackUtterance(id){
   fetch('/api/call/ack',{method:'POST',
@@ -724,7 +731,8 @@ function speakPiper(text,voice){
     .then(r=>{if(!r.ok)throw new Error('tts '+r.status);return r.blob();})
     .then(blob=>new Promise((resolve)=>{
       const url=URL.createObjectURL(blob);const a=new Audio(url);
-      const fin=()=>{URL.revokeObjectURL(url);resolve();};
+      callPlayback.audioEl=a;
+      const fin=()=>{URL.revokeObjectURL(url);if(callPlayback.audioEl===a)callPlayback.audioEl=null;resolve();};
       a.onended=fin;a.onerror=fin;a.play().catch(fin);}))
     .catch(()=>speakWeb(text));}
 function speakOne(text,voice){
@@ -743,9 +751,68 @@ function handleCall(state){
     callPlayback.spokenIds.add(cur.id);
     ensureCallVoice().then(()=>speakUtterance(cur));
   }}
+// Phase 2b: mic capture -> STT -> /api/call/transcript. Whisper sidecar when
+// available, else the browser's Web Speech recognition. Starting the mic
+// barges in: the current utterance is ducked so the human always wins the floor.
+function bargeIn(){
+  try{if(callPlayback.audioEl)callPlayback.audioEl.pause();}catch{}
+  try{if('speechSynthesis'in window)window.speechSynthesis.cancel();}catch{}}
+function sendTranscript(text,confidence){
+  const t=String(text||'').trim();
+  if(!t)return;
+  fetch('/api/call/transcript',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({text:t,confidence})}).catch(()=>{});}
+function micLabel(){return callPlayback.recording?'■ stop':'🎙 talk';}
+function setMicUi(){const b=document.getElementById('callMicBtn');
+  if(b){b.textContent=micLabel();b.style.background=callPlayback.recording?'#b54':'#345';}}
+async function startRecording(){
+  bargeIn();
+  if(callPlayback.stt&&callPlayback.sttBase&&navigator.mediaDevices&&window.MediaRecorder){
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      const rec=new MediaRecorder(stream);callPlayback.chunks=[];
+      rec.ondataavailable=(e)=>{if(e.data&&e.data.size)callPlayback.chunks.push(e.data);};
+      rec.onstop=()=>{
+        stream.getTracks().forEach(t=>t.stop());
+        const blob=new Blob(callPlayback.chunks,{type:rec.mimeType||'audio/webm'});
+        fetch(callPlayback.sttBase+'/stt',{method:'POST',
+          headers:{'content-type':blob.type},body:blob})
+          .then(r=>r.ok?r.json():Promise.reject(r.status))
+          .then(j=>sendTranscript(j.text))
+          .catch(()=>{});};
+      callPlayback.rec=rec;rec.start();callPlayback.recording=true;setMicUi();return;
+    }catch{/* fall through to Web Speech */}
+  }
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(SR){
+    const r=new SR();r.lang='en-US';r.interimResults=false;r.maxAlternatives=1;
+    r.onresult=(e)=>{const res=e.results[0][0];sendTranscript(res.transcript,res.confidence);};
+    r.onend=()=>{callPlayback.recording=false;setMicUi();};
+    callPlayback.recog=r;r.start();callPlayback.recording=true;setMicUi();return;
+  }
+  alert('No microphone input available (need the Whisper sidecar or a browser with speech recognition).');}
+function stopRecording(){
+  callPlayback.recording=false;setMicUi();
+  try{if(callPlayback.rec&&callPlayback.rec.state!=='inactive')callPlayback.rec.stop();}catch{}
+  try{if(callPlayback.recog)callPlayback.recog.stop();}catch{}
+  callPlayback.rec=null;callPlayback.recog=null;}
+function toggleMic(){callPlayback.recording?stopRecording():startRecording();}
+let micMounted=false;
+function mountMicButton(){
+  if(micMounted||typeof document==='undefined'||!document.body)return;
+  micMounted=true;
+  const b=document.createElement('button');
+  b.id='callMicBtn';b.textContent=micLabel();
+  b.style.cssText='position:fixed;right:14px;bottom:14px;z-index:9999;'
+    +'padding:10px 14px;border:0;border-radius:18px;background:#345;color:#fff;'
+    +'font:600 13px system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)';
+  b.title='Push to talk on the conference call';
+  b.onclick=toggleMic;
+  document.body.appendChild(b);}
 function connect(){const ws=new WebSocket(
   (location.protocol==='https:'?'wss://':'ws://')+location.host);
-  ws.onopen=()=>{connLive=true;retry=0;};
+  ws.onopen=()=>{connLive=true;retry=0;ensureCallVoice();};
   ws.onclose=()=>{connLive=false;setTimeout(connect,Math.min(5000,500*++retry));};
   ws.onerror=()=>ws.close();
   ws.onmessage=(e)=>{const m=JSON.parse(e.data);
