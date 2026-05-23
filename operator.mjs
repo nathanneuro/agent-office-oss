@@ -27,11 +27,15 @@ const log = (...a) => console.log(...a);
 const URGENCY_RANK = { high: 3, normal: 2, low: 1 };
 
 // Deterministic selection — judgment-free, so it lives in the core regardless of
-// brain (CONFERENCE_CALL.md §7D): highest urgency, then longest-waiting.
+// brain (CONFERENCE_CALL.md §7D). Clarification re-bids (an agent that couldn't
+// act on a routed instruction) come first so an in-flight exchange closes before
+// new turns start; then highest urgency, then longest-waiting.
 function arbitrate(bids) {
   if (!bids || !bids.length) return null;
+  const tier = (b) => (b.kind === 'clarification' ? 1 : 0);
   return [...bids].sort((a, b) =>
-    (URGENCY_RANK[b.urgency] || 2) - (URGENCY_RANK[a.urgency] || 2)
+    tier(b) - tier(a)
+    || (URGENCY_RANK[b.urgency] || 2) - (URGENCY_RANK[a.urgency] || 2)
     || a.createdAt - b.createdAt)[0];
 }
 

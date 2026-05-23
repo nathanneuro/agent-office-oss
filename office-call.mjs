@@ -25,7 +25,7 @@ const argv = process.argv.slice(2);
 function help() {
   console.log(
     'node office-call.mjs speak <message...>\n'
-    + 'node office-call.mjs bid <question...> [--summary "..."] [--urgency high|normal|low]\n'
+    + 'node office-call.mjs bid <question...> [--summary "..."] [--urgency high|normal|low] [--clarify]\n'
     + 'node office-call.mjs state\n'
     + '\n'
     + 'If <message> is omitted, stdin is used.\n'
@@ -93,6 +93,8 @@ if (cmd === 'state') {
 
 if (cmd === 'bid') {
   let rest = argv.slice(1);
+  const clarify = rest.includes('--clarify');
+  rest = rest.filter((a) => a !== '--clarify');
   const summaryOpt = takeOpt(rest, '--summary'); rest = summaryOpt.rest;
   const urgencyOpt = takeOpt(rest, '--urgency'); rest = urgencyOpt.rest;
   const question = readMessage(rest);
@@ -106,10 +108,13 @@ if (cmd === 'bid') {
       agentName: me.name,
       question,
       summary: summaryOpt.value || '',
-      urgency: urgencyOpt.value || 'normal',
+      // A clarification re-bid (last instruction was too unclear to act on) jumps
+      // the queue so the human can resolve it before new turns start.
+      kind: clarify ? 'clarification' : 'turn',
+      urgency: urgencyOpt.value || (clarify ? 'high' : 'normal'),
     }),
   });
-  console.log(`bid placed (${res.bid.urgency}) · the Operator will grant a turn`);
+  console.log(`${clarify ? 'clarification ' : ''}bid placed (${res.bid.urgency}) · the Operator will grant a turn`);
   process.exit(0);
 }
 

@@ -1703,12 +1703,16 @@ function finishCall(id) {
 
 // A bid is the structured "I want the floor" / "I need a decision" (§4). Latest
 // bid per agent wins; the Operator clears it when the turn is granted.
-function submitBid({ agentId, agentName, urgency, summary, question, options, blockedOn } = {}) {
+function submitBid({ agentId, agentName, urgency, summary, question, options, blockedOn, kind } = {}) {
   if (!agentId) return null;
   const bid = {
     id: 'b_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     agentId,
     agentName: agentName || 'Agent',
+    // 'clarification' = a re-bid because a routed instruction was too unclear to
+    // act on; the Operator prioritizes these so the half-finished exchange closes
+    // before new turns start (CONFERENCE_CALL.md §6).
+    kind: kind === 'clarification' ? 'clarification' : 'turn',
     urgency: urgency || 'normal',
     summary: summary ? String(summary) : '',
     question: question ? String(question) : '',

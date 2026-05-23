@@ -4,14 +4,14 @@ A voice extension for The Office: each agent gets a distinct synthesized voice,
 the human talks back by voice, and a hidden coordinator decides who speaks when
 and who your replies are addressed to.
 
-Status: **Phases 0–2 built; Phase 3 design.** Phase 0 (speak-queue + speechifier),
-Phase 1 (Piper voice sidecar, per-agent voices, announcer voice), and Phase 2 (the
-Operator coordinator + bidding + routing, plus browser mic capture and a Whisper
-STT sidecar with barge-in) are implemented. The Operator brain runs on OpenRouter
-with a deterministic no-key fallback. Phase 3 (agent-to-agent dialogue) remains
-design. Note: the audio paths (Piper, Whisper, in-browser mic/playback) are built
-with graceful Web Speech fallbacks but were not exercised end to end in CI — they
-need a real browser plus the model binaries to verify live.
+Status: **Phases 0–2 built — feature complete for the intended scope.** Phase 0
+(speak-queue + speechifier), Phase 1 (Piper voice sidecar, per-agent voices,
+announcer voice), and Phase 2 (the Operator coordinator + bidding + routing +
+clarification re-bids, plus browser mic capture and a Whisper STT sidecar with
+barge-in) are implemented. The Operator brain runs on OpenRouter with a
+deterministic no-key fallback. Note: the audio paths (Piper, Whisper, in-browser
+mic/playback) are built with graceful Web Speech fallbacks but were not exercised
+end to end in CI — they need a real browser plus the model binaries to verify live.
 
 ---
 
@@ -31,6 +31,12 @@ Turn the existing text-based monitoring room into a spoken "conference call":
 
 Latency is **not** a priority for this use case, which deliberately shapes
 several decisions below (favor accuracy and deliberation over speed).
+
+**Scope.** This is strictly **operator-orchestrated agent → human → agent**
+next-task assignment: agents report and ask, you decide by voice, the Operator
+routes your decision back. Agent-to-agent audio dialogue is **out of scope** — the
+only voices on the call are the participating agents (one at a time) and the
+Operator's announcer; agents never talk to each other over audio.
 
 ---
 
@@ -288,6 +294,40 @@ already has.
   session via tmux). Voice mode becomes an audio skin over the inbox that already
   exists.
 
+### Two kinds of "unclear", two different handlers
+
+There are two distinct failure modes, and they're handled at different layers:
+
+1. **The Operator can't parse your speech** (STT too garbled). Handled *before*
+   anything reaches an agent: the Operator requests a rephrase (the confidence-floor
+   path above). Nothing is injected.
+2. **Your answer parsed fine, but the agent still can't act on the resulting
+   instruction** (it's ambiguous or insufficient *in the agent's own context* — the
+   Operator has no way to know the cache has three variants, say). The agent is the
+   only party that can detect this, so the agent **re-bids for a second human
+   round** rather than guessing.
+
+The clarification re-bid loop (case 2):
+
+```
+agent gets routed instruction ──► can't act on it ──► re-bids {kind:"clarification",
+   ▲                                                   question:"You said use the
+   │                                                   cache — which one?"}
+   └── routed answer ◄── you answer ◄── Operator grants it NEXT (jumps the queue)
+```
+
+- A clarification bid (`office-call.mjs bid --clarify "…"`,
+  `POST /api/call/bid {kind:"clarification"}`) **outranks fresh turns** in
+  arbitration (§7D), so a half-finished exchange closes before new agents start —
+  no agent is left blocked on an instruction it can't use.
+- The loop is re-entrant: a clarified answer that's *still* too unclear just
+  produces another clarification bid. Each round is a normal turn, so it composes
+  with everything else (announce, speech-shaping, routing).
+- **Agent-side contract:** an agent that receives a routed instruction it cannot
+  confidently act on must re-bid with `--clarify` and a specific question, rather
+  than guess. This belongs in the agents' call skill alongside the succinctness
+  rule.
+
 ---
 
 ## 7. Operator prompt templates
@@ -340,8 +380,9 @@ just asked"), fuzzy/phonetic-matching the spoken token against the roster (§6).
 
 ### D. Bid arbitration
 
-Ranks outstanding bids and chooses the next speaker (urgency, staleness, blocking
-others) — see §4.
+Chooses the next speaker — see §4. Order: **clarification re-bids first** (close a
+half-finished exchange before starting new ones), then urgency, then longest-
+waiting. This tier is deterministic and runs regardless of brain.
 
 ### E. Disambiguation phrasing
 
@@ -406,10 +447,14 @@ Each phase is independently useful.
   `OFFICE_OPERATOR=1`. _2b [built]_: browser push-to-talk mic capture + Whisper STT
   sidecar (`stt-sidecar.mjs`, `npm run stt`) + barge-in (mic ducks the current
   utterance), feeding `/api/call/transcript`. Falls back to the Web Speech
-  recognition API when the sidecar is down.
-- **Phase 3 — agent-to-agent dialogue.** The expensive event-driven-agent
-  problem; easier here because the Operator can prompt agents to respond to each
-  other, not just to you. Decide later if it's worth it.
+  recognition API when the sidecar is down. Includes the **clarification re-bid**
+  loop (§6): an agent that can't act on a routed instruction re-bids
+  (`--clarify`), and that bid jumps the queue.
+
+**Out of scope: agent-to-agent audio dialogue.** Earlier drafts floated a "Phase 3"
+where agents converse over audio. That is explicitly not part of this feature (see
+Scope, §1). The call is operator-orchestrated agent → human → agent task
+assignment only.
 
 ---
 
